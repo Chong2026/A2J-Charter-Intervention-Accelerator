@@ -1,5 +1,5 @@
 # A2J-Charter-Intervention-Accelerator
-### A2AJ Project 2026-2027
+### A2AJ Project 2026-2027 (a2aj.ca)
 
 An open-source toolkit mapping intervenor coalitions in Supreme Court of Canada 
 Charter litigation to advance access to justice.
