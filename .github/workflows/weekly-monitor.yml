@@ -1,0 +1,50 @@
+name: Weekly Charter Intervention Monitor
+
+on:
+  schedule:
+    # 14:00 UTC every Monday = 9-10am Toronto time (varies with daylight saving).
+    # Cron syntax: minute hour day-of-month month day-of-week
+    - cron: "0 14 * * 1"
+  # Lets you trigger a run manually from the Actions tab, to test without waiting for Monday.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write  # needed so the workflow can commit the updated database back to the repo
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the monitor
+        env:
+          SCC_MONITOR_CONTACT: ${{ secrets.SCC_MONITOR_CONTACT }}
+          ALERT_SMTP_HOST: ${{ secrets.ALERT_SMTP_HOST }}
+          ALERT_SMTP_PORT: ${{ secrets.ALERT_SMTP_PORT }}
+          ALERT_SMTP_USER: ${{ secrets.ALERT_SMTP_USER }}
+          ALERT_SMTP_PASS: ${{ secrets.ALERT_SMTP_PASS }}
+          ALERT_FROM: ${{ secrets.ALERT_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python run_monitor.py
+
+      - name: Commit updated database, if it changed
+        run: |
+          git config user.name "A2J Charter Monitor (bot)"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- data/monitor.sqlite; then
+            git add data/monitor.sqlite
+            git commit -m "Update monitor database [automated]"
+            git push
+          else
+            echo "No changes to the database this run."
+          fi
