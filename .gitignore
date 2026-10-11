@@ -1,0 +1,5 @@
+secrets.ps1
+monitor.log
+__pycache__/
+*.pyc
+.pytest_cache/
