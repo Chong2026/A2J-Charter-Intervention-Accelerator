@@ -83,29 +83,37 @@ def test_end_to_end(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("ALERT_SMTP_USER", "me@gmail.com")
     monkeypatch.setenv("ALERT_SMTP_PASS", "pw")
     monkeypatch.setenv("ALERT_TO", "me@gmail.com")
-    sent = {}
+    outbox = []
     def fake_send_email(**kwargs):
-        sent.update(kwargs)
+        outbox.append(kwargs)
     monkeypatch.setattr(run_monitor, "send_email", fake_send_email)
 
-    # A section filter that 42224 (s. 1, s. 2(a), s. 15) does not match: nothing sent, still un-alerted
+    # "only" mode with sections 42224 (s. 1, s. 2(a), s. 15) does not raise: nothing sent, still un-alerted
     monkeypatch.setenv("ALERT_SECTIONS", "s.7 - arbitrariness, s 8")
+    monkeypatch.setenv("ALERT_SECTIONS_MODE", "only")
     run_monitor.maybe_send_alerts(db)
-    assert sent == {}
+    assert outbox == []
     assert db.execute("SELECT alerted FROM pending_cases WHERE case_no='42224'").fetchone() == (0,)
 
-    # Widening the filter to s. 2 sends it
+    # Default "extra" mode with a matching section: priority email first, then the general one
     monkeypatch.setenv("ALERT_SECTIONS", "s. 2")
+    monkeypatch.delenv("ALERT_SECTIONS_MODE")
     run_monitor.maybe_send_alerts(db)
+    assert [m["subject"] for m in outbox] == [
+        "[s. 2] 1 new Charter case granted leave to appeal at the SCC",
+        "1 new Charter case granted leave to appeal at the SCC",
+    ]
+    assert "Priority alert" in outbox[0]["body"]
+    sent = outbox[-1]
     assert "Charter issues: s. 1 reasonable limits; s. 2(a) freedom of religion/conscience; s. 15 equality" in sent["body"]
     assert "42224" in sent["body"] and "2026-12-01" in sent["body"]
     assert "42219" not in sent["body"]  # 42219 is not Charter, must not appear
     alerted = dict(db.execute("SELECT case_no, alerted FROM pending_cases WHERE is_charter=1"))
     assert alerted == {"42224": 1}
     # Calling again should be a no-op (nothing left to alert)
-    sent.clear()
+    outbox.clear()
     run_monitor.maybe_send_alerts(db)
-    assert sent == {}
+    assert outbox == []
 
     run_monitor.report(db)
     out = capsys.readouterr().out
@@ -122,3 +130,26 @@ def test_ensure_schema_adds_column_to_old_database(tmp_path):
     run_monitor.ensure_schema(db)                 # safe to run twice
     run_monitor.retag_all(db)
     assert db.execute("SELECT charter_tags FROM pending_cases").fetchone() == ("s. 8",)
+
+
+def _case(no, tags):
+    return {"case_no": no, "title": f"Case {no}", "docket_url": "u", "granted_on": "2026-10-01",
+            "appeal_from": "Ontario", "deadlines": [], "tags": tags}
+
+
+def test_plan_alert_emails_modes():
+    a, b = _case("1", ["s. 7 – arbitrariness"]), _case("2", ["s. 8"])
+    # no sections chosen: one general email, both marked
+    emails, marked = run_monitor.plan_alert_emails([a, b], [], "extra")
+    assert len(emails) == 1 and marked == [a, b]
+    # extra: priority email (case 1) + general email (both), both marked
+    emails, marked = run_monitor.plan_alert_emails([a, b], ["s. 7"], "extra")
+    assert [e[0] for e in emails] == ["[s. 7] 1 new Charter case granted leave to appeal at the SCC",
+                                      "2 new Charter cases granted leave to appeal at the SCC"]
+    assert marked == [a, b]
+    # extra with no match: just the general email
+    emails, marked = run_monitor.plan_alert_emails([b], ["s. 7"], "extra")
+    assert [e[0] for e in emails] == ["1 new Charter case granted leave to appeal at the SCC"]
+    # only: just case 1; case 2 stays un-alerted
+    emails, marked = run_monitor.plan_alert_emails([a, b], ["s. 7"], "only")
+    assert len(emails) == 1 and "Case 2" not in emails[0][1] and marked == [a]

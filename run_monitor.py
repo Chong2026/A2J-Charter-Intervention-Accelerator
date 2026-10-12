@@ -168,48 +168,78 @@ def mark_alerted(db, case_nos: list[str]):
     db.commit()
 
 
-def maybe_send_alerts(db):
-    """Send one email covering all not-yet-alerted Charter cases, if SMTP is configured.
+def plan_alert_emails(cases: list[dict], wanted: list[str], mode: str) -> tuple[list[tuple[str, str]], list[dict]]:
+    """Decide which emails to send for the un-alerted Charter cases.
 
-    If ALERT_SECTIONS is set (e.g. "s. 7, s. 15"), only cases tagged with one of those
-    sections or doctrines are sent. Cases that don't match stay un-alerted, so they will
-    be sent later if the filter is widened.
+    Returns ([(subject, body), ...], cases_to_mark_alerted).
+      * no ALERT_SECTIONS: one general email with every case.
+      * ALERT_SECTIONS, mode "extra" (default): a priority email with the matching cases,
+        plus the general email with every case.
+      * ALERT_SECTIONS, mode "only": one email with the matching cases; the rest are not
+        sent and stay un-alerted (they will be sent if the filter is later widened).
+    """
+    if not wanted:
+        return ([format_alert_email(cases)] if cases else []), cases
+    matching = [c for c in cases if matches_filter(c["tags"], wanted)]
+    if mode == "only":
+        return ([format_alert_email(matching)] if matching else []), matching
+    emails = []
+    if matching:
+        emails.append(format_alert_email(matching, focus=wanted))
+    if cases:
+        emails.append(format_alert_email(cases))
+    return emails, cases
+
+
+def maybe_send_alerts(db):
+    """Email the not-yet-alerted Charter cases, if SMTP is configured.
+
+    ALERT_SECTIONS (e.g. "s. 7, s. 15") picks sections of special interest, and
+    ALERT_SECTIONS_MODE says what to do with them: "extra" (default) sends an additional
+    priority email for matching cases on top of the general alert; "only" sends just the
+    matching cases. See plan_alert_emails.
     """
     wanted = parse_filter(os.environ.get("ALERT_SECTIONS"))
-    all_cases = get_unalerted_charter_cases(db)
-    cases = [c for c in all_cases if matches_filter(c["tags"], wanted)]
+    mode = (os.environ.get("ALERT_SECTIONS_MODE") or "extra").strip().lower()
+    if mode not in ("extra", "only"):
+        print(f"\n! Unknown ALERT_SECTIONS_MODE '{mode}', using 'extra'.", file=sys.stderr)
+        mode = "extra"
+    cases = get_unalerted_charter_cases(db)
+    emails, to_mark = plan_alert_emails(cases, wanted, mode)
     if wanted:
-        print(f"\nAlert filter: {', '.join(wanted)} "
-              f"({len(cases)} of {len(all_cases)} un-alerted Charter case(s) match)")
-    if not cases:
+        n = sum(matches_filter(c["tags"], wanted) for c in cases)
+        print(f"\nSections of interest: {', '.join(wanted)} (mode: {mode}); "
+              f"{n} of {len(cases)} un-alerted Charter case(s) match")
+    if not emails:
         print("\nNo new Charter-case alerts to send.")
         return
 
     required = ["ALERT_SMTP_HOST", "ALERT_SMTP_PORT", "ALERT_SMTP_USER", "ALERT_SMTP_PASS", "ALERT_TO"]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
-        print(f"\n{len(cases)} Charter case(s) awaiting alert, but email is not configured "
+        print(f"\n{len(to_mark)} Charter case(s) awaiting alert, but email is not configured "
               f"(missing: {', '.join(missing)}). Set these environment variables to enable email.")
         return
 
-    subject, body = format_alert_email(cases)
-    try:
-        send_email(
-            smtp_host=os.environ["ALERT_SMTP_HOST"],
-            smtp_port=int(os.environ["ALERT_SMTP_PORT"]),
-            smtp_user=os.environ["ALERT_SMTP_USER"],
-            smtp_pass=os.environ["ALERT_SMTP_PASS"],
-            from_addr=os.environ.get("ALERT_FROM", os.environ["ALERT_SMTP_USER"]),
-            to_addr=os.environ["ALERT_TO"],
-            subject=subject,
-            body=body,
-        )
-    except Exception as e:
-        print(f"\n! Failed to send alert email: {e}", file=sys.stderr)
-        return
+    for subject, body in emails:
+        try:
+            send_email(
+                smtp_host=os.environ["ALERT_SMTP_HOST"],
+                smtp_port=int(os.environ["ALERT_SMTP_PORT"]),
+                smtp_user=os.environ["ALERT_SMTP_USER"],
+                smtp_pass=os.environ["ALERT_SMTP_PASS"],
+                from_addr=os.environ.get("ALERT_FROM", os.environ["ALERT_SMTP_USER"]),
+                to_addr=os.environ["ALERT_TO"],
+                subject=subject,
+                body=body,
+            )
+        except Exception as e:
+            print(f"\n! Failed to send alert email: {e}", file=sys.stderr)
+            return  # nothing marked, so the next run tries again
+        print(f"\nSent: {subject}")
 
-    mark_alerted(db, [c["case_no"] for c in cases])
-    print(f"\nSent alert email for {len(cases)} Charter case(s) to {os.environ['ALERT_TO']}.")
+    mark_alerted(db, [c["case_no"] for c in to_mark])
+    print(f"Marked {len(to_mark)} Charter case(s) as alerted ({os.environ['ALERT_TO']}).")
 
 
 def report(db):

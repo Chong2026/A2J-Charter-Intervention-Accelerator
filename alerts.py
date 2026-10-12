@@ -23,11 +23,14 @@ KIND_LABELS = {
 }
 
 
-def format_alert_email(cases: list[dict]) -> tuple[str, str]:
+def format_alert_email(cases: list[dict], focus: list[str] | None = None) -> tuple[str, str]:
     """cases: [{case_no, title, granted_on, appeal_from, charter_basis, docket_url, deadlines: [(kind, due_date)]}]
 
     Returns (subject, plain-text body). Cases should already be sorted the way
     you want them to appear (run_monitor sorts by granted_on).
+
+    focus: the sections a "priority" email is about (e.g. ["s. 7", "s. 15"]). They are
+    named in the subject line and the opening sentence.
     """
     if not cases:
         return "", ""
@@ -38,10 +41,13 @@ def format_alert_email(cases: list[dict]) -> tuple[str, str]:
         else f"{len(cases)} new Charter cases granted leave to appeal at the SCC"
     )
 
-    lines = [
-        "The Charter Intervention Monitor found the following newly granted case(s):",
-        "",
-    ]
+    if focus:
+        subject = f"[{', '.join(focus)}] {subject}"
+        intro = (f"Priority alert: the following newly granted case(s) raise {', '.join(focus)}. "
+                 "They are also included in the general alert.")
+    else:
+        intro = "The Charter Intervention Monitor found the following newly granted case(s):"
+    lines = [intro, ""]
     for c in cases:
         lines.append(f"{c['title']}")
         lines.append(f"  Case No. {c['case_no']}  |  leave granted {c['granted_on']}  |  from {c['appeal_from']}")

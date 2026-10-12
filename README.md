@@ -89,10 +89,12 @@ To send email alerts, also set `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`,
 `ALERT_SMTP_USER`, `ALERT_SMTP_PASS` and `ALERT_TO` (see `secrets.example.ps1`).
 Without them the Monitor still runs and simply skips the email.
 
-To be alerted only about particular sections or doctrines, set `ALERT_SECTIONS`,
-e.g. `s. 7, s. 15` (on GitHub: Settings > Secrets and variables > Actions >
-Variables). `s. 7` also matches its doctrines such as `s. 7 – arbitrariness`;
-`s. 2` matches `s. 2(a)` to `s. 2(d)`. Leave it unset to get every Charter case.
+To flag particular sections or doctrines, set `ALERT_SECTIONS`, e.g. `s. 7, s. 15`
+(on GitHub: Settings > Secrets and variables > Actions > Variables). `s. 7` also
+matches its doctrines such as `s. 7 – arbitrariness`; `s. 2` matches `s. 2(a)` to
+`s. 2(d)`. By default (`ALERT_SECTIONS_MODE=extra`) matching cases get an extra
+priority email and every Charter case still arrives in the usual alert; with
+`ALERT_SECTIONS_MODE=only`, only matching cases are emailed.
 
 **Tests:**
 

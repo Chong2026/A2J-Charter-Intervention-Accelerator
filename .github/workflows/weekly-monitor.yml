@@ -38,6 +38,9 @@ jobs:
           # Optional: only alert on these Charter sections/doctrines, e.g. "s. 7, s. 15".
           # Set under Settings > Secrets and variables > Actions > Variables. Empty = all Charter cases.
           ALERT_SECTIONS: ${{ vars.ALERT_SECTIONS }}
+          # "extra" (default): extra priority email for those sections, plus the usual one.
+          # "only": email only those sections.
+          ALERT_SECTIONS_MODE: ${{ vars.ALERT_SECTIONS_MODE }}
         run: python run_monitor.py
 
       - name: Commit updated database, if it changed
