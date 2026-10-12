@@ -17,6 +17,9 @@ $env:ALERT_SMTP_PASS = "your-16-character-app-password"
 $env:ALERT_FROM = $env:ALERT_SMTP_USER
 $env:ALERT_TO   = "you@gmail.com"
 
+# Optional: send health warnings somewhere other than ALERT_TO.
+# $env:HEALTH_TO = "you@example.com"
+
 # Optional: Charter sections or doctrines of special interest. Comma-separated.
 # "s. 7" also matches s. 7 doctrines; "s. 2" matches s. 2(a)-(d).
 # $env:ALERT_SECTIONS = "s. 7, s. 15"

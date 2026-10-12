@@ -36,6 +36,11 @@ legal clinics find pro bono constitutional lawyers and vice versa.
   Registry's keyword phrases (`charter_tags.py`, a lawyer-editable table).
 - Extracts the intervention deadlines from the Registrar's scheduling letter on
   the docket (motion for leave to intervene, responses, replies, factums).
+- Publishes a public page of Charter appeals open for intervention, with a
+  subscribable deadline calendar (`calendar.ics`) and open data (`cases.json`),
+  built by `build_site.py` and hosted on GitHub Pages.
+- Checks its own health each run: if the SCC feed or pages change in a way that
+  could make it miss cases, it emails a warning and the run shows as failed.
 - Runs weekly on GitHub Actions (`.github/workflows/weekly-monitor.yml`) and emails
   an alert for each new Charter case. Alerts currently go to the maintainer only;
   subscriber sign-up is planned.

@@ -9,7 +9,13 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write  # needed so the workflow can commit the updated database back to the repo
+  contents: write  # commit the updated database back to the repo
+  pages: write     # publish the public site
+  id-token: write  # required by the GitHub Pages deployment
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
 
 jobs:
   run-monitor:
@@ -27,6 +33,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run the monitor
+        # Exits with an error if the health checks find a problem (a warning email is sent
+        # too), so the run shows as failed. The database is still committed below.
         env:
           SCC_MONITOR_CONTACT: ${{ secrets.SCC_MONITOR_CONTACT }}
           ALERT_SMTP_HOST: ${{ secrets.ALERT_SMTP_HOST }}
@@ -35,8 +43,10 @@ jobs:
           ALERT_SMTP_PASS: ${{ secrets.ALERT_SMTP_PASS }}
           ALERT_FROM: ${{ secrets.ALERT_FROM }}
           ALERT_TO: ${{ secrets.ALERT_TO }}
-          # Optional: only alert on these Charter sections/doctrines, e.g. "s. 7, s. 15".
-          # Set under Settings > Secrets and variables > Actions > Variables. Empty = all Charter cases.
+          # Optional: where health warnings go (defaults to ALERT_TO).
+          HEALTH_TO: ${{ secrets.HEALTH_TO }}
+          # Optional: Charter sections of special interest, e.g. "s. 7, s. 15".
+          # Set under Settings > Secrets and variables > Actions > Variables.
           ALERT_SECTIONS: ${{ vars.ALERT_SECTIONS }}
           # "extra" (default): extra priority email for those sections, plus the usual one.
           # "only": email only those sections.
@@ -44,6 +54,7 @@ jobs:
         run: python run_monitor.py
 
       - name: Commit updated database, if it changed
+        if: always()
         run: |
           git config user.name "A2J Charter Monitor (bot)"
           git config user.email "actions@users.noreply.github.com"
@@ -54,3 +65,32 @@ jobs:
           else
             echo "No changes to the database this run."
           fi
+
+  publish-site:
+    # Rebuilds the public page from the latest database, even if the health check failed.
+    needs: run-monitor
+    if: always()
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Check out the latest commit (including the bot's database update)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the site
+        run: python build_site.py
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

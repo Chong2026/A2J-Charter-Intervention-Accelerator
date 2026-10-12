@@ -30,6 +30,10 @@ FEED_URL = "https://decisions.scc-csc.ca/scc-csc/scc-l-csc-a/en/json/rss.do"
 DOCKET_URL = "https://www.scc-csc.ca/cases-dossiers/search-recherche/{}/"
 REFRESH_DAYS = 45
 PAUSE_SECONDS = 1.0
+# Health-check thresholds
+FEED_STALE_DAYS = 60       # newest leave decision in the feed older than this -> feed may be stuck
+SCHEDULE_GRACE_DAYS = 21   # granted case with no Registrar schedule after this long -> parser may be broken
+HEALTH_WINDOW_DAYS = 90    # only check cases granted within this many days
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pending_cases (
@@ -75,6 +79,62 @@ def split_tags(raw) -> list[str]:
     return [t for t in (raw or "").split(TAG_SEP) if t]
 
 
+class Health:
+    """Collects signs that the SCC pages or feed have changed so the Monitor is silently missing cases."""
+
+    def __init__(self):
+        self.problems: list[str] = []
+
+    def warn(self, msg: str):
+        self.problems.append(msg)
+        print(f"! HEALTH: {msg}", file=sys.stderr)
+
+
+def check_feed(items, health: Health, today: date):
+    if not items:
+        health.warn("The SCC leave feed returned no items.")
+        return
+    bad = [i for i in items if not all(k in i for k in ("id", "url", "title", "content_text", "date_published"))]
+    if bad:
+        health.warn(f"{len(bad)} feed item(s) are missing expected fields (id/url/title/content_text/date_published).")
+    if not any(str(i.get("content_text", "")).startswith(("Granted", "Dismissed")) for i in items):
+        health.warn("No feed item starts with 'Granted' or 'Dismissed'; the feed's wording may have changed.")
+    dates = sorted(str(i.get("date_published", ""))[:10] for i in items if i.get("date_published"))
+    if dates:
+        try:
+            newest = date.fromisoformat(dates[-1])
+            if (today - newest).days > FEED_STALE_DAYS:
+                health.warn(f"Newest item in the SCC leave feed is from {newest}, more than {FEED_STALE_DAYS} days ago.")
+        except ValueError:
+            health.warn(f"Could not read feed dates (e.g. {dates[-1]!r}).")
+
+
+def check_stored_cases(db, health: Health, today: date):
+    """Recently granted cases should have a Registrar schedule and docket keywords/summary."""
+    window = (today - timedelta(days=HEALTH_WINDOW_DAYS)).isoformat()
+    grace = (today - timedelta(days=SCHEDULE_GRACE_DAYS)).isoformat()
+    rows = db.execute(
+        "SELECT case_no, granted_on, keywords, summary FROM pending_cases "
+        "WHERE granted_on >= ? AND granted_on <= ?", (window, grace)).fetchall()
+    for case_no, granted_on, kw, summ in rows:
+        has_schedule = db.execute("SELECT 1 FROM pending_deadlines WHERE case_no=? LIMIT 1", (case_no,)).fetchone()
+        if not has_schedule:
+            health.warn(f"Case {case_no} (leave granted {granted_on}) still has no deadlines parsed from the "
+                        f"Registrar's letter: {DOCKET_URL.format(case_no)}")
+        if not (kw or summ):
+            health.warn(f"Case {case_no} (leave granted {granted_on}) has no keywords or summary on its docket "
+                        f"page, so it cannot be classified: {DOCKET_URL.format(case_no)}")
+
+
+def format_health_email(problems: list[str], run_url: str = "") -> tuple[str, str]:
+    lines = ["The Charter Intervention Monitor ran but found signs that it may be missing cases.",
+             "This usually means the SCC changed its website or feed. Please check:", ""]
+    lines += [f"- {p}" for p in problems]
+    if run_url:
+        lines += ["", f"Run log: {run_url}"]
+    return f"[Monitor health warning] {len(problems)} problem(s) found", "\n".join(lines)
+
+
 class Fetcher:
     def __init__(self, contact: str):
         self.session = requests.Session()
@@ -107,10 +167,12 @@ def save_docket(db, case_no: str, d: dict):
         [(case_no, x["kind"], x["due_date"], x["raw_text"]) for x in d["deadlines"]])
 
 
-def process_new_grants(db, fetcher: Fetcher) -> int:
+def process_new_grants(db, fetcher: Fetcher, health: Health | None = None) -> int:
+    health = health or Health()
     feed = fetcher.session.get(FEED_URL, timeout=30)
     feed.raise_for_status()
-    items = feed.json()["items"]
+    items = feed.json().get("items") or []
+    check_feed(items, health, date.today())
     known = {r[0] for r in db.execute("SELECT feed_item_id FROM pending_cases")}
     new = [i for i in items if i["content_text"].startswith("Granted") and i["id"] not in known]
     print(f"Feed: {len(items)} items, {sum(i['content_text'].startswith('Granted') for i in items)} granted, "
@@ -119,7 +181,7 @@ def process_new_grants(db, fetcher: Fetcher) -> int:
     for it in reversed(new):  # oldest first
         info = parse_item_lines(html_to_lines(fetcher.get(it["url"] + "?iframe=true")))
         if not info["case_no"]:
-            print(f"  ! could not read case number for {it['url']}; skipped", file=sys.stderr)
+            health.warn(f"Could not read the case number for granted item {it['url']} (skipped).")
             continue
         db.execute(
             "INSERT OR IGNORE INTO pending_cases (case_no, feed_item_id, title, item_url, docket_url, "
@@ -191,6 +253,42 @@ def plan_alert_emails(cases: list[dict], wanted: list[str], mode: str) -> tuple[
     return emails, cases
 
 
+SMTP_REQUIRED = ["ALERT_SMTP_HOST", "ALERT_SMTP_PORT", "ALERT_SMTP_USER", "ALERT_SMTP_PASS", "ALERT_TO"]
+
+
+def smtp_send(subject: str, body: str, to_addr: str | None = None):
+    """Send one email with the ALERT_SMTP_* settings. Raises on failure."""
+    send_email(
+        smtp_host=os.environ["ALERT_SMTP_HOST"],
+        smtp_port=int(os.environ["ALERT_SMTP_PORT"]),
+        smtp_user=os.environ["ALERT_SMTP_USER"],
+        smtp_pass=os.environ["ALERT_SMTP_PASS"],
+        from_addr=os.environ.get("ALERT_FROM") or os.environ["ALERT_SMTP_USER"],
+        to_addr=to_addr or os.environ["ALERT_TO"],
+        subject=subject,
+        body=body,
+    )
+
+
+def send_health_warning(problems: list[str]):
+    """Email the maintainer (HEALTH_TO, else ALERT_TO). Never raises."""
+    if not problems:
+        return
+    if any(not os.environ.get(k) for k in SMTP_REQUIRED):
+        print("! Health problems found but email is not configured; see the messages above.", file=sys.stderr)
+        return
+    run_url = ""
+    if os.environ.get("GITHUB_RUN_ID"):
+        run_url = (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+                   f"{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+    subject, body = format_health_email(problems, run_url)
+    try:
+        smtp_send(subject, body, os.environ.get("HEALTH_TO") or None)
+        print(f"Sent: {subject}")
+    except Exception as e:
+        print(f"! Could not send the health warning email: {e}", file=sys.stderr)
+
+
 def maybe_send_alerts(db):
     """Email the not-yet-alerted Charter cases, if SMTP is configured.
 
@@ -214,8 +312,7 @@ def maybe_send_alerts(db):
         print("\nNo new Charter-case alerts to send.")
         return
 
-    required = ["ALERT_SMTP_HOST", "ALERT_SMTP_PORT", "ALERT_SMTP_USER", "ALERT_SMTP_PASS", "ALERT_TO"]
-    missing = [k for k in required if not os.environ.get(k)]
+    missing = [k for k in SMTP_REQUIRED if not os.environ.get(k)]
     if missing:
         print(f"\n{len(to_mark)} Charter case(s) awaiting alert, but email is not configured "
               f"(missing: {', '.join(missing)}). Set these environment variables to enable email.")
@@ -223,16 +320,7 @@ def maybe_send_alerts(db):
 
     for subject, body in emails:
         try:
-            send_email(
-                smtp_host=os.environ["ALERT_SMTP_HOST"],
-                smtp_port=int(os.environ["ALERT_SMTP_PORT"]),
-                smtp_user=os.environ["ALERT_SMTP_USER"],
-                smtp_pass=os.environ["ALERT_SMTP_PASS"],
-                from_addr=os.environ.get("ALERT_FROM", os.environ["ALERT_SMTP_USER"]),
-                to_addr=os.environ["ALERT_TO"],
-                subject=subject,
-                body=body,
-            )
+            smtp_send(subject, body)
         except Exception as e:
             print(f"\n! Failed to send alert email: {e}", file=sys.stderr)
             return  # nothing marked, so the next run tries again
@@ -272,11 +360,21 @@ def main():
     db = sqlite3.connect(args.db)
     ensure_schema(db)
     fetcher = Fetcher(contact)
-    process_new_grants(db, fetcher)
-    refresh_recent(db, fetcher)
-    retag_all(db)
-    maybe_send_alerts(db)
-    report(db)
+    health = Health()
+    try:
+        process_new_grants(db, fetcher, health)
+        refresh_recent(db, fetcher)
+        retag_all(db)
+        check_stored_cases(db, health, date.today())
+        maybe_send_alerts(db)
+        report(db)
+    except Exception as e:
+        health.warn(f"The Monitor crashed: {type(e).__name__}: {e}")
+        send_health_warning(health.problems)
+        raise
+    if health.problems:
+        send_health_warning(health.problems)
+        sys.exit(2)  # marks the GitHub Actions run as failed, so GitHub also notifies you
 
 
 if __name__ == "__main__":
