@@ -6,6 +6,8 @@ Kept network code (send_email) separate from the pure formatting function
 import smtplib
 from email.message import EmailMessage
 
+from charter_tags import describe
+
 # Human-readable labels for the deadline "kind" codes from scc_parse.parse_schedule
 KIND_LABELS = {
     "notice_of_appeal": "Notice of appeal filed",
@@ -44,6 +46,8 @@ def format_alert_email(cases: list[dict]) -> tuple[str, str]:
         lines.append(f"{c['title']}")
         lines.append(f"  Case No. {c['case_no']}  |  leave granted {c['granted_on']}  |  from {c['appeal_from']}")
         lines.append(f"  {c['docket_url']}")
+        if "tags" in c:
+            lines.append(f"  Charter issues: {describe(c['tags'])}")
         if c["deadlines"]:
             most_relevant = next(
                 (d for d in c["deadlines"] if d[0] == "intervention_motion"), c["deadlines"][0]

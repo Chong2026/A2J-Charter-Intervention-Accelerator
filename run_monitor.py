@@ -24,6 +24,7 @@ import requests
 from scc_parse import (classify_charter, html_to_lines, parse_item_lines,
                        parse_keywords_summary, parse_schedule)
 from alerts import format_alert_email, send_email
+from charter_tags import matches_filter, parse_filter, tag_charter_case
 
 FEED_URL = "https://decisions.scc-csc.ca/scc-csc/scc-l-csc-a/en/json/rss.do"
 DOCKET_URL = "https://www.scc-csc.ca/cases-dossiers/search-recherche/{}/"
@@ -46,6 +47,32 @@ CREATE TABLE IF NOT EXISTS pending_deadlines (
     PRIMARY KEY (case_no, kind)
 );
 """
+TAG_SEP = " | "
+
+
+def ensure_schema(db):
+    """Create tables, and add columns introduced after the database was first created."""
+    db.executescript(SCHEMA)
+    cols = {r[1] for r in db.execute("PRAGMA table_info(pending_cases)")}
+    if "charter_tags" not in cols:
+        db.execute("ALTER TABLE pending_cases ADD COLUMN charter_tags TEXT")
+    db.commit()
+
+
+def retag_all(db):
+    """(Re)compute Charter section tags for every Charter case from its stored keywords and summary.
+
+    Cheap, so it runs every time: an edit to charter_tags.py applies to old cases too.
+    """
+    rows = db.execute("SELECT case_no, keywords, summary FROM pending_cases WHERE is_charter = 1").fetchall()
+    db.executemany(
+        "UPDATE pending_cases SET charter_tags = ? WHERE case_no = ?",
+        [(TAG_SEP.join(tag_charter_case(kw or "", sm or "")), no) for no, kw, sm in rows])
+    db.commit()
+
+
+def split_tags(raw) -> list[str]:
+    return [t for t in (raw or "").split(TAG_SEP) if t]
 
 
 class Fetcher:
@@ -122,16 +149,17 @@ def refresh_recent(db, fetcher: Fetcher):
 
 def get_unalerted_charter_cases(db) -> list[dict]:
     rows = db.execute(
-        "SELECT case_no, title, docket_url, granted_on, appeal_from FROM pending_cases "
+        "SELECT case_no, title, docket_url, granted_on, appeal_from, charter_tags FROM pending_cases "
         "WHERE is_charter = 1 AND alerted = 0 ORDER BY granted_on"
     ).fetchall()
     cases = []
-    for case_no, title, docket_url, granted_on, appeal_from in rows:
+    for case_no, title, docket_url, granted_on, appeal_from, tags in rows:
         deadlines = db.execute(
             "SELECT kind, due_date FROM pending_deadlines WHERE case_no=? ORDER BY due_date", (case_no,)
         ).fetchall()
         cases.append({"case_no": case_no, "title": title, "docket_url": docket_url,
-                      "granted_on": granted_on, "appeal_from": appeal_from, "deadlines": deadlines})
+                      "granted_on": granted_on, "appeal_from": appeal_from, "deadlines": deadlines,
+                      "tags": split_tags(tags)})
     return cases
 
 
@@ -141,8 +169,18 @@ def mark_alerted(db, case_nos: list[str]):
 
 
 def maybe_send_alerts(db):
-    """Send one email covering all not-yet-alerted Charter cases, if SMTP is configured."""
-    cases = get_unalerted_charter_cases(db)
+    """Send one email covering all not-yet-alerted Charter cases, if SMTP is configured.
+
+    If ALERT_SECTIONS is set (e.g. "s. 7, s. 15"), only cases tagged with one of those
+    sections or doctrines are sent. Cases that don't match stay un-alerted, so they will
+    be sent later if the filter is widened.
+    """
+    wanted = parse_filter(os.environ.get("ALERT_SECTIONS"))
+    all_cases = get_unalerted_charter_cases(db)
+    cases = [c for c in all_cases if matches_filter(c["tags"], wanted)]
+    if wanted:
+        print(f"\nAlert filter: {', '.join(wanted)} "
+              f"({len(cases)} of {len(all_cases)} un-alerted Charter case(s) match)")
     if not cases:
         print("\nNo new Charter-case alerts to send.")
         return
@@ -177,12 +215,13 @@ def maybe_send_alerts(db):
 def report(db):
     print("\n=== Charter cases with leave granted ===")
     cases = db.execute(
-        "SELECT case_no, title, granted_on, appeal_from, charter_basis FROM pending_cases "
+        "SELECT case_no, title, granted_on, appeal_from, charter_basis, charter_tags FROM pending_cases "
         "WHERE is_charter = 1 ORDER BY granted_on DESC").fetchall()
     if not cases:
         print("(none yet)")
-    for case_no, title, granted_on, appeal_from, basis in cases:
+    for case_no, title, granted_on, appeal_from, basis, tags in cases:
         print(f"\n{case_no}  {title[:90]}\n  leave granted {granted_on}, from {appeal_from}, Charter flag via {basis}")
+        print(f"  Charter issues: {', '.join(split_tags(tags)) or 'section not identified'}")
         for kind, due in db.execute(
                 "SELECT kind, due_date FROM pending_deadlines WHERE case_no=? ORDER BY due_date", (case_no,)):
             print(f"    {due}  {kind}")
@@ -201,10 +240,11 @@ def main():
 
     os.makedirs(os.path.dirname(args.db) or ".", exist_ok=True)
     db = sqlite3.connect(args.db)
-    db.executescript(SCHEMA)
+    ensure_schema(db)
     fetcher = Fetcher(contact)
     process_new_grants(db, fetcher)
     refresh_recent(db, fetcher)
+    retag_all(db)
     maybe_send_alerts(db)
     report(db)
 

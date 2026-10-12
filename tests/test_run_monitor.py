@@ -55,12 +55,14 @@ class FakeFetcher:
 
 def test_end_to_end(tmp_path, capsys, monkeypatch):
     db = sqlite3.connect(tmp_path / "m.sqlite")
-    db.executescript(run_monitor.SCHEMA)
+    run_monitor.ensure_schema(db)
     f = FakeFetcher()
 
     assert run_monitor.process_new_grants(db, f) == 2          # dismissed item ignored
     assert run_monitor.process_new_grants(db, f) == 0          # idempotent on second run
     run_monitor.refresh_recent(db, f)                          # nothing due for refresh today
+    run_monitor.retag_all(db)
+    monkeypatch.delenv("ALERT_SECTIONS", raising=False)
 
     # No SMTP env vars set -> alert is skipped, not marked as sent
     for k in ["ALERT_SMTP_HOST", "ALERT_SMTP_PORT", "ALERT_SMTP_USER", "ALERT_SMTP_PASS", "ALERT_TO"]:
@@ -85,7 +87,17 @@ def test_end_to_end(tmp_path, capsys, monkeypatch):
     def fake_send_email(**kwargs):
         sent.update(kwargs)
     monkeypatch.setattr(run_monitor, "send_email", fake_send_email)
+
+    # A section filter that 42224 (s. 1, s. 2(a), s. 15) does not match: nothing sent, still un-alerted
+    monkeypatch.setenv("ALERT_SECTIONS", "s.7 - arbitrariness, s 8")
     run_monitor.maybe_send_alerts(db)
+    assert sent == {}
+    assert db.execute("SELECT alerted FROM pending_cases WHERE case_no='42224'").fetchone() == (0,)
+
+    # Widening the filter to s. 2 sends it
+    monkeypatch.setenv("ALERT_SECTIONS", "s. 2")
+    run_monitor.maybe_send_alerts(db)
+    assert "Charter issues: s. 1 reasonable limits; s. 2(a) freedom of religion/conscience; s. 15 equality" in sent["body"]
     assert "42224" in sent["body"] and "2026-12-01" in sent["body"]
     assert "42219" not in sent["body"]  # 42219 is not Charter, must not appear
     alerted = dict(db.execute("SELECT case_no, alerted FROM pending_cases WHERE is_charter=1"))
@@ -97,4 +109,16 @@ def test_end_to_end(tmp_path, capsys, monkeypatch):
 
     run_monitor.report(db)
     out = capsys.readouterr().out
+    assert "Charter issues: s. 1, s. 2(a), s. 15" in out
     assert "42224" in out and "2026-12-01  intervention_motion" in out and "42219" not in out.split("=== Charter")[1]
+
+
+def test_ensure_schema_adds_column_to_old_database(tmp_path):
+    db = sqlite3.connect(tmp_path / "old.sqlite")
+    db.executescript(run_monitor.SCHEMA)          # database created before charter_tags existed
+    db.execute("INSERT INTO pending_cases (case_no, is_charter, keywords, summary) VALUES "
+               "('1', 1, 'Constitutional law — Charter of Rights — Search and seizure', '')")
+    run_monitor.ensure_schema(db)
+    run_monitor.ensure_schema(db)                 # safe to run twice
+    run_monitor.retag_all(db)
+    assert db.execute("SELECT charter_tags FROM pending_cases").fetchone() == ("s. 8",)

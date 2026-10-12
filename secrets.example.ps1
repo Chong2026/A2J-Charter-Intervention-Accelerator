@@ -16,3 +16,8 @@ $env:ALERT_SMTP_PASS = "your-16-character-app-password"
 # Who receives the alert. For now, send it to yourself.
 $env:ALERT_FROM = $env:ALERT_SMTP_USER
 $env:ALERT_TO   = "you@gmail.com"
+
+# Optional: only email Charter cases that raise these sections or doctrines.
+# Comma-separated. "s. 7" also matches s. 7 doctrines; "s. 2" matches s. 2(a)-(d).
+# Leave empty (or delete the line) to be alerted on every Charter case.
+# $env:ALERT_SECTIONS = "s. 7, s. 15, s. 7 - arbitrariness"

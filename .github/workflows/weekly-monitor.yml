@@ -35,6 +35,9 @@ jobs:
           ALERT_SMTP_PASS: ${{ secrets.ALERT_SMTP_PASS }}
           ALERT_FROM: ${{ secrets.ALERT_FROM }}
           ALERT_TO: ${{ secrets.ALERT_TO }}
+          # Optional: only alert on these Charter sections/doctrines, e.g. "s. 7, s. 15".
+          # Set under Settings > Secrets and variables > Actions > Variables. Empty = all Charter cases.
+          ALERT_SECTIONS: ${{ vars.ALERT_SECTIONS }}
         run: python run_monitor.py
 
       - name: Commit updated database, if it changed

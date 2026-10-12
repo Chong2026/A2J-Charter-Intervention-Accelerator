@@ -31,6 +31,9 @@ legal clinics find pro bono constitutional lawyers and vice versa.
   granted leave applications.
 - Flags likely Charter cases using the keywords on the SCC docket page. This is a
   heuristic and can miss constitutional cases that do not use Charter keywords.
+- Tags each Charter case with the sections and doctrines it raises (for example
+  `s. 2(a)`, `s. 11(b)`, `s. 7 – arbitrariness`), from explicit citations and the
+  Registry's keyword phrases (`charter_tags.py`, a lawyer-editable table).
 - Extracts the intervention deadlines from the Registrar's scheduling letter on
   the docket (motion for leave to intervene, responses, replies, factums).
 - Runs weekly on GitHub Actions (`.github/workflows/weekly-monitor.yml`) and emails
@@ -85,6 +88,11 @@ uv run --with requests --with beautifulsoup4 --with lxml python run_monitor.py
 To send email alerts, also set `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`,
 `ALERT_SMTP_USER`, `ALERT_SMTP_PASS` and `ALERT_TO` (see `secrets.example.ps1`).
 Without them the Monitor still runs and simply skips the email.
+
+To be alerted only about particular sections or doctrines, set `ALERT_SECTIONS`,
+e.g. `s. 7, s. 15` (on GitHub: Settings > Secrets and variables > Actions >
+Variables). `s. 7` also matches its doctrines such as `s. 7 – arbitrariness`;
+`s. 2` matches `s. 2(a)` to `s. 2(d)`. Leave it unset to get every Charter case.
 
 **Tests:**
 
